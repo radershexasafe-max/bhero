@@ -1,0 +1,221 @@
+name: Build APK
+
+'on':
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+    paths:
+      - mobile/**
+      - .github/workflows/build-apk.yml
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+      GRADLE_OPTS: -Dorg.gradle.vfs.watch=false -Dorg.gradle.daemon=false -Dkotlin.incremental=false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect Flutter project directory (marker 2026-04-22b)
+        id: project
+        run: |
+          echo "WORKFLOW_MARKER=2026-04-22b-detect-project"
+          echo "PWD=$(pwd)"
+          echo "Repository root contents:"
+          ls -la
+          echo "mobile contents:"
+          ls -la mobile || true
+
+          PROJECT_PUBSPEC=""
+          if [ -f "./mobile/pubspec.yaml" ]; then
+            PROJECT_PUBSPEC="./mobile/pubspec.yaml"
+          elif [ -f "./pubspec.yaml" ]; then
+            PROJECT_PUBSPEC="./pubspec.yaml"
+          else
+            PROJECT_PUBSPEC="$(find . -maxdepth 3 -name pubspec.yaml -not -path '*/build/*' | head -n 1)"
+          fi
+
+          if [ -z "$PROJECT_PUBSPEC" ]; then
+            echo "::error::Could not find pubspec.yaml in repo root, mobile/, or any first-level Flutter project folder."
+            echo "Find results:"
+            find . -maxdepth 3 -name pubspec.yaml -not -path '*/build/*' || true
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_PUBSPEC")"
+          PROJECT_DIR="${PROJECT_DIR#./}"
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+            ARTIFACT_DIR="build/app/outputs/flutter-apk"
+          else
+            ARTIFACT_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
+          fi
+
+          echo "Detected pubspec: $PROJECT_PUBSPEC"
+          echo "Using project_dir=$PROJECT_DIR"
+          echo "Using artifact_dir=$ARTIFACT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "artifact_dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.2'
+          channel: stable
+          cache: true
+
+      - name: Generate Android platform files
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: flutter create --platforms android .
+
+      - name: Install dependencies
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: flutter pub get
+
+      - name: Let Flutter finalize Android config
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: flutter build apk --debug --config-only
+
+      - name: Add required permissions
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          ensure_permission() {
+            PERMISSION="$1"
+            if ! grep -q "$PERMISSION" "$MANIFEST"; then
+              sed -i "s|<application|<uses-permission android:name=\"$PERMISSION\"/>\n    <application|" "$MANIFEST"
+            fi
+          }
+          ensure_feature() {
+            FEATURE="$1"
+            if ! grep -q "$FEATURE" "$MANIFEST"; then
+              sed -i "s|<application|<uses-feature android:name=\"$FEATURE\" android:required=\"false\"/>\n    <application|" "$MANIFEST"
+            fi
+          }
+          sed -i 's/android:label="[^"]*"/android:label="T.One Bales"/' "$MANIFEST"
+          ensure_permission "android.permission.INTERNET"
+          ensure_permission "android.permission.ACCESS_NETWORK_STATE"
+          ensure_permission "android.permission.POST_NOTIFICATIONS"
+          ensure_permission "android.permission.READ_CONTACTS"
+          ensure_permission "android.permission.WRITE_CONTACTS"
+          ensure_permission "android.permission.CAMERA"
+          ensure_feature "android.hardware.camera"
+          ensure_permission "android.permission.BLUETOOTH"
+          ensure_permission "android.permission.BLUETOOTH_ADMIN"
+          ensure_permission "android.permission.BLUETOOTH_CONNECT"
+          ensure_permission "android.permission.BLUETOOTH_SCAN"
+          echo "--- AndroidManifest.xml ---"
+          cat "$MANIFEST"
+
+      - name: Verify source manifest permissions
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          grep -q 'android.permission.READ_CONTACTS' "$MANIFEST" || { echo "::error::READ_CONTACTS is missing from source manifest"; exit 1; }
+          grep -q 'android.permission.WRITE_CONTACTS' "$MANIFEST" || { echo "::error::WRITE_CONTACTS is missing from source manifest"; exit 1; }
+          grep -q 'android.permission.POST_NOTIFICATIONS' "$MANIFEST" || { echo "::error::POST_NOTIFICATIONS is missing from source manifest"; exit 1; }
+          echo "Source manifest permissions verified."
+
+      - name: Patch Android SDK versions
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          # Current Flutter Android plugins need minSdk 21 and compile/target SDK 36.
+          echo "=== Gradle files ==="
+          ls -la android/app/build.gradle* || true
+          ls -la android/settings.gradle* || true
+
+          if [ -f android/local.properties ]; then
+            grep -v '^flutter\.compileSdkVersion=' android/local.properties | grep -v '^flutter\.targetSdkVersion=' > android/local.properties.tmp || true
+            mv android/local.properties.tmp android/local.properties
+            {
+              echo 'flutter.compileSdkVersion=36'
+              echo 'flutter.targetSdkVersion=36'
+            } >> android/local.properties
+            echo "--- android/local.properties ---"
+            cat android/local.properties
+          fi
+
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle.kts
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle.kts
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' android/app/build.gradle.kts
+            echo "--- android/app/build.gradle.kts ---"
+            cat android/app/build.gradle.kts
+          fi
+
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle
+            sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/' android/app/build.gradle
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
+            sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' android/app/build.gradle
+            sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' android/app/build.gradle
+            echo "--- android/app/build.gradle ---"
+            cat android/app/build.gradle
+          fi
+
+      - name: Tune Gradle for CI stability
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          GRADLE_PROPERTIES="android/gradle.properties"
+          touch "$GRADLE_PROPERTIES"
+          ensure_prop() {
+            KEY="$1"
+            VALUE="$2"
+            if grep -q "^$KEY=" "$GRADLE_PROPERTIES"; then
+              sed -i "s|^$KEY=.*|$KEY=$VALUE|" "$GRADLE_PROPERTIES"
+            else
+              echo "$KEY=$VALUE" >> "$GRADLE_PROPERTIES"
+            fi
+          }
+          ensure_prop "org.gradle.vfs.watch" "false"
+          ensure_prop "org.gradle.daemon" "false"
+          ensure_prop "org.gradle.parallel" "true"
+          ensure_prop "org.gradle.caching" "true"
+          ensure_prop "kotlin.incremental" "false"
+          echo "--- android/gradle.properties ---"
+          cat "$GRADLE_PROPERTIES"
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: flutter build apk --debug --no-pub
+
+      - name: Verify merged debug manifest permissions
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          echo "WORKFLOW_MARKER=2026-04-21-app-manifest-check"
+          DEBUG_MANIFEST="$(find build/app/intermediates \( -path '*merged_manifests*debug*AndroidManifest.xml' -o -path '*merged_manifest*debug*AndroidManifest.xml' \) | head -n 1)"
+          if [ -z "$DEBUG_MANIFEST" ]; then
+            echo "::error::Could not find the merged debug AndroidManifest.xml"
+            find build -name 'AndroidManifest.xml' || true
+            exit 1
+          fi
+          echo "--- app merged debug manifest: $DEBUG_MANIFEST ---"
+          cat "$DEBUG_MANIFEST"
+          grep -q 'android.permission.READ_CONTACTS' "$DEBUG_MANIFEST" || { echo "::error::READ_CONTACTS is missing from the merged debug manifest"; exit 1; }
+          grep -q 'android.permission.WRITE_CONTACTS' "$DEBUG_MANIFEST" || { echo "::error::WRITE_CONTACTS is missing from the merged debug manifest"; exit 1; }
+          grep -q 'android.permission.POST_NOTIFICATIONS' "$DEBUG_MANIFEST" || { echo "::error::POST_NOTIFICATIONS is missing from the merged debug manifest"; exit 1; }
+          echo "Merged debug manifest permissions verified."
+
+      - name: Build release APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: flutter build apk --release --no-pub
+
+      - name: Upload universal APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: ${{ steps.project.outputs.artifact_dir }}/app-release.apk
+          if-no-files-found: error
+          retention-days: 3
+

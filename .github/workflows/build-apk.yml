@@ -103,7 +103,7 @@ jobs:
               sed -i "s|<application|<uses-feature android:name=\"$FEATURE\" android:required=\"false\"/>\n    <application|" "$MANIFEST"
             fi
           }
-          sed -i 's/android:label="[^"]*"/android:label="T.One Bales"/' "$MANIFEST"
+          sed -i 's/android:label="[^"]*"/android:label="T.One"/' "$MANIFEST"
           ensure_permission "android.permission.INTERNET"
           ensure_permission "android.permission.ACCESS_NETWORK_STATE"
           ensure_permission "android.permission.POST_NOTIFICATIONS"
@@ -117,6 +117,56 @@ jobs:
           ensure_permission "android.permission.BLUETOOTH_SCAN"
           echo "--- AndroidManifest.xml ---"
           cat "$MANIFEST"
+
+      - name: Inject branded app icon
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          BRAND_ICON="assets/branding/tone_app_icon.png"
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ ! -f "$BRAND_ICON" ]; then
+            echo "::error::Bundled app icon was not found at $BRAND_ICON"
+            exit 1
+          fi
+
+          mkdir -p android/app/src/main/res/mipmap-anydpi-v26
+          mkdir -p android/app/src/main/res/values
+
+          cat > android/app/src/main/res/values/ic_launcher_background.xml <<'EOF'
+          <resources>
+              <color name="ic_launcher_background">#FFFFFF</color>
+          </resources>
+          EOF
+
+          for DENSITY in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p "android/app/src/main/res/$DENSITY"
+            cp "$BRAND_ICON" "android/app/src/main/res/$DENSITY/ic_launcher.png"
+            cp "$BRAND_ICON" "android/app/src/main/res/$DENSITY/ic_launcher_round.png"
+            cp "$BRAND_ICON" "android/app/src/main/res/$DENSITY/ic_launcher_foreground.png"
+          done
+
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+          sed -i 's/android:icon="[^"]*"/android:icon="@mipmap\/ic_launcher"/' "$MANIFEST"
+          if grep -q 'android:roundIcon=' "$MANIFEST"; then
+            sed -i 's/android:roundIcon="[^"]*"/android:roundIcon="@mipmap\/ic_launcher_round"/' "$MANIFEST"
+          else
+            sed -i 's|<application|<application android:roundIcon="@mipmap/ic_launcher_round"|' "$MANIFEST"
+          fi
+
+          echo "--- Branded launcher icon files ---"
+          find android/app/src/main/res -maxdepth 2 \\( -name 'ic_launcher.png' -o -name 'ic_launcher_round.png' -o -name 'ic_launcher_foreground.png' -o -name 'ic_launcher.xml' -o -name 'ic_launcher_round.xml' \\) | sort
 
       - name: Verify source manifest permissions
         working-directory: ${{ steps.project.outputs.project_dir }}

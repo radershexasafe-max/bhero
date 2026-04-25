@@ -166,7 +166,7 @@ jobs:
           fi
 
           echo "--- Branded launcher icon files ---"
-          find android/app/src/main/res -maxdepth 2 \\( -name 'ic_launcher.png' -o -name 'ic_launcher_round.png' -o -name 'ic_launcher_foreground.png' -o -name 'ic_launcher.xml' -o -name 'ic_launcher_round.xml' \\) | sort
+          find android/app/src/main/res -maxdepth 2 -name 'ic_launcher*' | sort
 
       - name: Verify source manifest permissions
         working-directory: ${{ steps.project.outputs.project_dir }}
